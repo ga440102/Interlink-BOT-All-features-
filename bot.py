@@ -8,9 +8,7 @@ from aiohttp_socks import ProxyConnector
 from base64 import urlsafe_b64decode
 from datetime import datetime
 from colorama import *
-import asyncio, time, json, pytz, re, os
-
-wib = pytz.timezone('Asia/Jakarta')
+import asyncio, time, json, sys, re, os
 
 class Interlink:
     def __init__(self) -> None:
@@ -23,14 +21,14 @@ class Interlink:
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
-        self.access_tokens = {}
+        self.tokens = {}
 
     def clear_terminal(self):
         os.system('cls' if os.name == 'nt' else 'clear')
 
     def log(self, message):
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}{message}",
             flush=True
         )
@@ -51,7 +49,7 @@ class Interlink:
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
     def load_accounts(self):
-        filename = "tokens.json"
+        filename = "accounts.json"
         try:
             if not os.path.exists(filename):
                 self.log(f"{Fore.RED}File {filename} Not Found.{Style.RESET_ALL}")
@@ -198,7 +196,7 @@ class Interlink:
         url = f"{self.BASE_API}/token/get-token"
         headers = {
             **self.HEADERS,
-            "Authorization": f"Bearer {self.access_tokens[email]}"
+            "Authorization": f"Bearer {self.tokens[email]['accessToken']}"
         }
         await asyncio.sleep(3)
         for attempt in range(retries):
@@ -225,7 +223,7 @@ class Interlink:
         url = f"{self.BASE_API}/token/check-is-claimable"
         headers = {
             **self.HEADERS,
-            "Authorization": f"Bearer {self.access_tokens[email]}"
+            "Authorization": f"Bearer {self.tokens[email]['accessToken']}"
         }
         await asyncio.sleep(3)
         for attempt in range(retries):
@@ -252,7 +250,7 @@ class Interlink:
         url = f"{self.BASE_API}/token/claim-airdrop"
         headers = {
             **self.HEADERS,
-            "Authorization": f"Bearer {self.access_tokens[email]}",
+            "Authorization": f"Bearer {self.tokens[email]['accessToken']}",
             "Content-Length": "2",
             "Content-Type": "application/json"
         }
@@ -349,7 +347,7 @@ class Interlink:
             
             else:
                 next_frame_ts = claimable.get("data", {}).get("nextFrame", 0) / 1000
-                next_frame_wib = datetime.fromtimestamp(next_frame_ts).astimezone(wib).strftime('%x %X %Z')
+                next_frame_wib = datetime.fromtimestamp(next_frame_ts).strftime('%x %X')
 
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Mining :{Style.RESET_ALL}"
@@ -383,8 +381,11 @@ class Interlink:
                 separator = "=" * 27
                 for idx, account in enumerate(accounts, start=1):
                     if account:
-                        email = account["email"]
-                        token = account["token"]
+                        email = account.get("email")
+                        tokens = account.get("tokens", {})
+                        access_token = tokens.get("accessToken")
+                        refresh_token = tokens.get("refreshToken")
+
                         self.log(
                             f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
                             f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
@@ -393,7 +394,7 @@ class Interlink:
                             f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
                         )
 
-                        if not "@" in email or not token:
+                        if not email or not "@" in email or not access_token or not refresh_token:
                             self.log(
                                 f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
                                 f"{Fore.RED+Style.BRIGHT} Invalid Account Data {Style.RESET_ALL}"
@@ -405,7 +406,7 @@ class Interlink:
                             f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(email)} {Style.RESET_ALL}"
                         )
 
-                        exp_time = self.decode_token(token)
+                        exp_time = self.decode_token(access_token)
                         if not exp_time:
                             self.log(
                                 f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
@@ -420,7 +421,10 @@ class Interlink:
                             )
                             continue
 
-                        self.access_tokens[email] = token
+                        self.tokens[email] = {
+                            "accessToken": access_token,
+                            "refreshToken": refresh_token
+                        }
                         
                         await self.process_accounts(email, use_proxy, rotate_proxy)
                         await asyncio.sleep(3)
@@ -450,7 +454,8 @@ if __name__ == "__main__":
         asyncio.run(bot.main())
     except KeyboardInterrupt:
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.RED + Style.BRIGHT}[ EXIT ] Interlink - BOT{Style.RESET_ALL}                                       "                              
         )
+        sys.exit(1)

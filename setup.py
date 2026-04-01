@@ -1,10 +1,13 @@
-from aiohttp import ClientResponseError, ClientSession, ClientTimeout, BasicAuth
+from aiohttp import (
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    BasicAuth
+)
 from aiohttp_socks import ProxyConnector
 from datetime import datetime
 from colorama import *
-import asyncio, json, pytz, re, os
-
-wib = pytz.timezone('Asia/Jakarta')
+import asyncio, json, sys, re, os
 
 class Interlink:
     def __init__(self) -> None:
@@ -23,7 +26,7 @@ class Interlink:
 
     def log(self, message):
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}{message}",
             flush=True
         )
@@ -86,8 +89,8 @@ class Interlink:
         except json.JSONDecodeError:
             return []
         
-    def save_tokens(self, new_accounts):
-        filename = "tokens.json"
+    def save_accounts(self, new_accounts):
+        filename = "accounts.json"
         try:
             if os.path.exists(filename) and os.path.getsize(filename) > 0:
                 with open(filename, 'r') as file:
@@ -98,17 +101,21 @@ class Interlink:
             account_dict = {acc["email"]: acc for acc in existing_accounts}
 
             for new_acc in new_accounts:
-                account_dict[new_acc["email"]] = new_acc
+                email = new_acc["email"]
+                if email in account_dict:
+                    account_dict[email]["tokens"] = new_acc["tokens"]
+                else:
+                    account_dict[email] = new_acc
 
             updated_accounts = list(account_dict.values())
 
             with open(filename, 'w') as file:
                 json.dump(updated_accounts, file, indent=4)
 
-            self.log_status("Save Tokens", "success", "Tokens saved to file")
+            self.log_status("Save Accounts", "success", "Accounts saved to file")
 
         except Exception as e:
-            self.log_status("Save Tokens", "failed", error=e)
+            self.log_status("Save Accounts", "failed", error=e)
             return []
         
     async def load_proxies(self):
@@ -307,7 +314,7 @@ class Interlink:
         if not request: return
 
         timestamp = (
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.CYAN + Style.BRIGHT}Action :{Style.RESET_ALL}"
         )
@@ -316,17 +323,24 @@ class Interlink:
         verify = await self.verify_otp(interlink_id, otp_code, proxy)
         if not verify: return
 
-        token = verify.get("data", {}).get("jwtToken")
-        if not token:
+        access_token = verify.get("data", {}).get("accessToken")
+        refresh_token = verify.get("data", {}).get("refreshToken")
+
+        if not access_token or not refresh_token:
             self.log_status("Process Account", "failed", error="No token received from authentication")
             return
 
-        if email and token:
-            account_data = [{"email":email, "token":token}]
-            self.save_tokens(account_data)
-            self.log_status("Process Account", "success", f"Account {self.mask_account(email)} processed successfully")
-        else:
-            self.log_status("Process Account", "failed", error="Invalid response data")
+        account_data = [{
+            "email": email,
+            "passcode": passcode,
+            "interlinkId": interlink_id,
+            "tokens": {
+                "accessToken": access_token,
+                "refreshToken": refresh_token
+            }
+        }]
+        self.save_accounts(account_data)
+        self.log_status("Process Account", "success", f"Account {self.mask_account(email)} processed successfully")
     
     async def main(self):
         try:
@@ -346,9 +360,9 @@ class Interlink:
 
             separator = "=" * 27
             for idx, account in enumerate(accounts, start=1):
-                email = account["email"]
-                passcode = account["passcode"]
-                interlink_id = account["interlinkId"]
+                email = account.get("email")
+                passcode = account.get("passcode")
+                interlink_id = account.get("interlinkId")
 
                 if not "@" in email or not passcode or not interlink_id:
                     self.log_status("Account Validation", "failed", error="Invalid account format")
@@ -380,7 +394,8 @@ if __name__ == "__main__":
         asyncio.run(bot.main())
     except KeyboardInterrupt:
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.RED + Style.BRIGHT}[ EXIT ] Interlink - BOT{Style.RESET_ALL}                                      ",                                       
         )
+        sys.exit(1)
