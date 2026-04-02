@@ -7,19 +7,17 @@ from aiohttp import (
 from aiohttp_socks import ProxyConnector
 from datetime import datetime
 from colorama import *
-import asyncio, json, sys, re, os
+import asyncio, random, json, sys, re, os
 
 class Interlink:
     def __init__(self) -> None:
-        self.HEADERS = {
-            "Accept-Encoding": "*/*",
-            "User-Agent": "okhttp/4.12.0",
-            "Accept-Encoding": "gzip"
-        }
         self.BASE_API = "https://prod.interlinklabs.ai/api/v1"
+        self.USE_PROXY = False
+        self.ROTATE_PROXY = False
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
+        self.accounts = {}
 
     def clear_terminal(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -62,7 +60,7 @@ class Interlink:
     def welcome(self):
         print(
             f"""
-        {Fore.GREEN + Style.BRIGHT}Interlink {Fore.BLUE + Style.BRIGHT}Auto BOT
+        {Fore.GREEN + Style.BRIGHT}Interlink Labs {Fore.BLUE + Style.BRIGHT}Auto BOT
             """
             f"""
         {Fore.GREEN + Style.BRIGHT}Rey? {Fore.YELLOW + Style.BRIGHT}<INI WATERMARK>
@@ -183,11 +181,31 @@ class Interlink:
 
         raise Exception("Unsupported Proxy Type.")
     
+    def display_proxy(self, proxy_url=None):
+        if not proxy_url: return "No Proxy"
+
+        proxy_url = re.sub(r"^(http|https|socks4|socks5)://", "", proxy_url)
+
+        if "@" in proxy_url:
+            proxy_url = proxy_url.split("@", 1)[1]
+
+        return proxy_url
+    
     def mask_account(self, account):
         if "@" in account:
             local, domain = account.split('@', 1)
             mask_account = local[:3] + '*' * 3 + local[-3:]
             return f"{mask_account}@{domain}"
+        
+    def initialize_headers(self):
+        headers = {
+            "Host": "prod.interlinklabs.ai",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": "okhttp/4.12.0"
+        }
+
+        return headers.copy()
 
     def print_question(self):
         while True:
@@ -202,53 +220,59 @@ class Interlink:
                         "Without"
                     )
                     print(f"{Fore.GREEN + Style.BRIGHT}Run {proxy_type} Proxy Selected.{Style.RESET_ALL}")
+                    self.USE_PROXY = True if proxy_choice == 1 else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Please enter either 1  or 2.{Style.RESET_ALL}")
             except ValueError:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1  or 2).{Style.RESET_ALL}")
 
-        rotate_proxy = False
-        if proxy_choice == 1:
+        if self.USE_PROXY:
             while True:
                 rotate_proxy = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip()
                 if rotate_proxy in ["y", "n"]:
-                    rotate_proxy = rotate_proxy == "y"
+                    self.ROTATE_PROXY = True if rotate_proxy == "y" else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
 
-        return proxy_choice, rotate_proxy
-    
+    async def enusre_ok(self, response):
+        if response.status >= 400:
+            raise Exception(f"HTTP: {response.status}:{await response.text()}")
+
     async def check_connection(self, proxy_url=None):
+        url = "https://api.ipify.org?format=json"
+        
         connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
         try:
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
-                async with session.get(url="https://api.ipify.org?format=json", proxy=proxy, proxy_auth=proxy_auth) as response:
-                    response.raise_for_status()
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=15)) as session:
+                async with session.get(url=url, proxy=proxy, proxy_auth=proxy_auth) as response:
+                    await self.enusre_ok(response)
                     self.log_status("Check Connection", "success", "Connection OK")
                     return True
         except (Exception, ClientResponseError) as e:
             self.log_status("Check Connection", "failed", error=e)
             return None
         
-    async def request_otp(self, email: str, passcode: str, interlink_id: str, proxy_url=None, retries=5):
+    async def request_otp(self, email: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/auth/send-otp-email-verify-login"
-        data = json.dumps({"loginId":int(interlink_id), "passcode":int(passcode), "email":email})
-        headers = {
-            **self.HEADERS,
-            "Content-Length": str(len(data)),
-            "Content-Type": "application/json"
-        }
+
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
+                headers = self.initialize_headers()
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "loginId": int(self.accounts[email]["interlinkId"]),
+                    "passcode": int(self.accounts[email]["passcode"]),
+                    "email": email
+                }
+
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, data=data, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
-                        response.raise_for_status()
-                        result = await response.json()
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.enusre_ok(response)
                         self.log_status("Request OTP", "success", "OTP request sent")
-                        return result
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     self.log_status("Request OTP", "retry", f"Attempt {attempt + 1}/{retries}")
@@ -258,23 +282,24 @@ class Interlink:
                     self.log_status("Request OTP", "failed", error=e)
                     return None
         
-    async def verify_otp(self, interlink_id: str, otp_code: str, proxy_url=None, retries=5):
+    async def verify_otp(self, email: str, otp_code: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/auth/check-otp-email-verify-login"
-        data = json.dumps({"loginId":int(interlink_id), "otp":int(otp_code)})
-        headers = {
-            **self.HEADERS,
-            "Content-Length": str(len(data)),
-            "Content-Type": "application/json"
-        }
+        
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
+                headers = self.initialize_headers()
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "loginId": int(self.accounts[email]["interlinkId"]),
+                    "otp": int(otp_code)
+                }
+
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, data=data, proxy=proxy, proxy_auth=proxy_auth) as response:
-                        response.raise_for_status()
-                        result = await response.json()
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.enusre_ok(response)
                         self.log_status("Verify OTP", "success", "OTP verified successfully")
-                        return result
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     self.log_status("Verify OTP", "retry", f"Attempt {attempt + 1}/{retries}")
@@ -284,33 +309,36 @@ class Interlink:
                     self.log_status("Verify OTP", "failed", error=e)
                     return None
         
-    async def process_check_connection(self, email: str, use_proxy: bool, rotate_proxy: bool):
+    async def process_check_connection(self, email: str, proxy_url=None):
         while True:
-            proxy = self.get_next_proxy_for_account(email) if use_proxy else None
+            if self.USE_PROXY:
+                proxy_url = self.get_next_proxy_for_account(email)
+
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Proxy  :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {proxy if proxy else 'No Proxy'} {Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT} {self.display_proxy(proxy_url)} {Style.RESET_ALL}"
             )
 
-            is_valid = await self.check_connection(proxy)
+            is_valid = await self.check_connection(proxy_url)
             if is_valid: return True
             
-            if rotate_proxy:
-                proxy = self.rotate_proxy_for_account(email)
+            if self.ROTATE_PROXY:
+                proxy_url = self.rotate_proxy_for_account(email)
                 await asyncio.sleep(1)
                 continue
 
             return False
 
-    async def process_accounts(self, email: str, passcode: str, interlink_id: str, use_proxy: bool, rotate_proxy: bool):
-        is_valid = await self.process_check_connection(email, use_proxy, rotate_proxy)
+    async def process_accounts(self, email: str, proxy_url=None):
+        is_valid = await self.process_check_connection(email, proxy_url)
         if not is_valid:
             self.log_status("Process Account", "failed", error="Connection check failed")
             return
 
-        proxy = self.get_next_proxy_for_account(email) if use_proxy else None
+        if self.USE_PROXY:
+            proxy_url = self.get_next_proxy_for_account(email)
 
-        request = await self.request_otp(email, passcode, interlink_id, proxy)
+        request = await self.request_otp(email, proxy_url)
         if not request: return
 
         timestamp = (
@@ -320,20 +348,16 @@ class Interlink:
         )
         otp_code = input(f"{timestamp}{Fore.BLUE + Style.BRIGHT} Enter OTP Code -> {Style.RESET_ALL}")
 
-        verify = await self.verify_otp(interlink_id, otp_code, proxy)
+        verify = await self.verify_otp(email, otp_code, proxy_url)
         if not verify: return
 
         access_token = verify.get("data", {}).get("accessToken")
         refresh_token = verify.get("data", {}).get("refreshToken")
 
-        if not access_token or not refresh_token:
-            self.log_status("Process Account", "failed", error="No token received from authentication")
-            return
-
         account_data = [{
             "email": email,
-            "passcode": passcode,
-            "interlinkId": interlink_id,
+            "interlinkId": self.accounts[email]["interlinkId"],
+            "passcode": self.accounts[email]["passcode"],
             "tokens": {
                 "accessToken": access_token,
                 "refreshToken": refresh_token
@@ -349,22 +373,19 @@ class Interlink:
                 print(f"{Fore.YELLOW + Style.BRIGHT}No Accounts Loaded{Style.RESET_ALL}")
                 return
             
-            proxy_choice, rotate_proxy = self.print_question()
-
+            self.print_question()
             self.clear_terminal()
             self.welcome()
 
-            use_proxy = True if proxy_choice == 1 else False
-            if use_proxy:
-                await self.load_proxies()
+            if self.USE_PROXY: self.load_proxies()
 
             separator = "=" * 27
             for idx, account in enumerate(accounts, start=1):
                 email = account.get("email")
-                passcode = account.get("passcode")
                 interlink_id = account.get("interlinkId")
+                passcode = account.get("passcode")
 
-                if not "@" in email or not passcode or not interlink_id:
+                if "@" not in email or not interlink_id or not passcode:
                     self.log_status("Account Validation", "failed", error="Invalid account format")
                     continue
 
@@ -381,8 +402,14 @@ class Interlink:
                     f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(email)} {Style.RESET_ALL}"
                 )
 
-                await self.process_accounts(email, passcode, interlink_id, use_proxy, rotate_proxy)
-                await asyncio.sleep(3)
+                if email not in self.accounts:
+                    self.accounts[email] = {
+                        "interlinkId": interlink_id,
+                        "passcode": passcode
+                    }
+
+                await self.process_accounts(email)
+                await asyncio.sleep(random.uniform(2.0, 3.0))
 
         except Exception as e:
             self.log_status("Main Process", "failed", error=e)

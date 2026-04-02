@@ -8,20 +8,17 @@ from aiohttp_socks import ProxyConnector
 from base64 import urlsafe_b64decode
 from datetime import datetime
 from colorama import *
-import asyncio, time, json, sys, re, os
+import asyncio, random, time, json, sys, re, os
 
 class Interlink:
     def __init__(self) -> None:
-        self.HEADERS = {
-            "Accept-Encoding": "*/*",
-            "User-Agent": "okhttp/4.12.0",
-            "Accept-Encoding": "gzip"
-        }
         self.BASE_API = "https://prod.interlinklabs.ai/api/v1"
+        self.USE_PROXY = False
+        self.ROTATE_PROXY = False
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
-        self.tokens = {}
+        self.accounts = {}
 
     def clear_terminal(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -36,7 +33,7 @@ class Interlink:
     def welcome(self):
         print(
             f"""
-        {Fore.GREEN + Style.BRIGHT}Auto Claim {Fore.BLUE + Style.BRIGHT}Interlink - BOT
+        {Fore.GREEN + Style.BRIGHT}Interlink Labs {Fore.BLUE + Style.BRIGHT}Auto BOT
             """
             f"""
         {Fore.GREEN + Style.BRIGHT}Rey? {Fore.YELLOW + Style.BRIGHT}<INI WATERMARK>
@@ -61,6 +58,32 @@ class Interlink:
                     return data
                 return []
         except json.JSONDecodeError:
+            return []
+        
+    def save_accounts(self, new_accounts):
+        filename = "accounts.json"
+        try:
+            if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                with open(filename, 'r') as file:
+                    existing_accounts = json.load(file)
+            else:
+                existing_accounts = []
+
+            account_dict = {acc["email"]: acc for acc in existing_accounts}
+
+            for new_acc in new_accounts:
+                email = new_acc["email"]
+                if email in account_dict:
+                    account_dict[email]["tokens"] = new_acc["tokens"]
+                else:
+                    account_dict[email] = new_acc
+
+            updated_accounts = list(account_dict.values())
+
+            with open(filename, 'w') as file:
+                json.dump(updated_accounts, file, indent=4)
+
+        except Exception as e:
             return []
     
     async def load_proxies(self):
@@ -128,9 +151,20 @@ class Interlink:
 
         raise Exception("Unsupported Proxy Type.")
     
-    def decode_token(self, token: str):
+    def display_proxy(self, proxy_url=None):
+        if not proxy_url: return "No Proxy"
+
+        proxy_url = re.sub(r"^(http|https|socks4|socks5)://", "", proxy_url)
+
+        if "@" in proxy_url:
+            proxy_url = proxy_url.split("@", 1)[1]
+
+        return proxy_url
+    
+    def decode_token(self, email: str):
         try:
-            header, payload, signature = token.split(".")
+            access_token = self.accounts[email]["accessToken"]
+            header, payload, signature = access_token.split(".")
             decoded_payload = urlsafe_b64decode(payload + "==").decode("utf-8")
             parsed_payload = json.loads(decoded_payload)
             exp_time = parsed_payload["exp"]
@@ -144,6 +178,16 @@ class Interlink:
             local, domain = account.split('@', 1)
             mask_account = local[:3] + '*' * 3 + local[-3:]
             return f"{mask_account}@{domain}"
+        
+    def initialize_headers(self):
+        headers = {
+            "Host": "prod.interlinklabs.ai",
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": "okhttp/4.12.0"
+        }
+
+        return headers.copy()
 
     def print_question(self):
         while True:
@@ -158,30 +202,34 @@ class Interlink:
                         "Without"
                     )
                     print(f"{Fore.GREEN + Style.BRIGHT}Run {proxy_type} Proxy Selected.{Style.RESET_ALL}")
+                    self.USE_PROXY = True if proxy_choice == 1 else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Please enter either 1  or 2.{Style.RESET_ALL}")
             except ValueError:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1  or 2).{Style.RESET_ALL}")
 
-        rotate_proxy = False
-        if proxy_choice == 1:
+        if self.USE_PROXY:
             while True:
                 rotate_proxy = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip()
                 if rotate_proxy in ["y", "n"]:
-                    rotate_proxy = rotate_proxy == "y"
+                    self.ROTATE_PROXY = True if rotate_proxy == "y" else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
 
-        return proxy_choice, rotate_proxy
-    
-    async def check_connection(self, proxy_url=None):
+    async def enusre_ok(self, response):
+        if response.status >= 400:
+            raise Exception(f"HTTP: {response.status}:{await response.text()}")
+
+    async def check_connection(self, email: str, proxy_url=None):
+        url = "https://api.ipify.org?format=json"
+        
         connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
         try:
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
-                async with session.get(url="https://api.ipify.org?format=json", proxy=proxy, proxy_auth=proxy_auth) as response:
-                    response.raise_for_status()
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=15)) as session:
+                async with session.get(url=url, proxy=proxy, proxy_auth=proxy_auth) as response:
+                    await self.enusre_ok(response)
                     return True
         except (Exception, ClientResponseError) as e:
             self.log(
@@ -192,19 +240,48 @@ class Interlink:
             )
             return None
     
-    async def token_balance(self, email: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/token/get-token"
-        headers = {
-            **self.HEADERS,
-            "Authorization": f"Bearer {self.tokens[email]['accessToken']}"
-        }
-        await asyncio.sleep(3)
+    async def refresh_token(self, email: str, proxy_url=None, retries=5):
+        url = f"{self.BASE_API}/auth/token"
+        
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
+                headers = self.initialize_headers()
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "refreshToken": self.accounts[email]["refreshToken"]
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
+                        await self.enusre_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Refreshing Tokens {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def token_balance(self, email: str, proxy_url=None, retries=5):
+        url = f"{self.BASE_API}/token/get-token"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers()
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
-                        response.raise_for_status()
+                        await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -212,7 +289,7 @@ class Interlink:
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Balance:{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} GET Token Earned Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Token Earned {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -221,17 +298,16 @@ class Interlink:
             
     async def claimable_check(self, email: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/token/check-is-claimable"
-        headers = {
-            **self.HEADERS,
-            "Authorization": f"Bearer {self.tokens[email]['accessToken']}"
-        }
-        await asyncio.sleep(3)
+        
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
+                headers = self.initialize_headers()
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
-                        response.raise_for_status()
+                        await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -239,7 +315,7 @@ class Interlink:
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Mining :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} GET Status Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Status {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -248,19 +324,17 @@ class Interlink:
             
     async def claim_airdrop(self, email: str, proxy_url=None, retries=1):
         url = f"{self.BASE_API}/token/claim-airdrop"
-        headers = {
-            **self.HEADERS,
-            "Authorization": f"Bearer {self.tokens[email]['accessToken']}",
-            "Content-Length": "2",
-            "Content-Type": "application/json"
-        }
-        await asyncio.sleep(3)
+
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
+                headers = self.initialize_headers()
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+                headers["Content-Type"] = "application/json"
+
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
-                        response.raise_for_status()
+                        await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -275,31 +349,66 @@ class Interlink:
 
         return None
     
-    async def process_check_connection(self, email: str, use_proxy: bool, rotate_proxy: bool):
+    async def process_check_connection(self, email: str, proxy_url=None):
         while True:
-            proxy = self.get_next_proxy_for_account(email) if use_proxy else None
-            self.log(
-                f"{Fore.CYAN+Style.BRIGHT}Proxy  :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {proxy if proxy else 'No Proxy'} {Style.RESET_ALL}"
-            )
+            if self.USE_PROXY:
+                proxy_url = self.get_next_proxy_for_account(email)
 
-            is_valid = await self.check_connection(proxy)
+            is_valid = await self.check_connection(proxy_url)
             if is_valid: return True
             
-            if rotate_proxy:
-                proxy = self.rotate_proxy_for_account(email)
+            if self.ROTATE_PROXY:
+                proxy_url = self.rotate_proxy_for_account(email)
                 await asyncio.sleep(1)
                 continue
 
             return False
             
-    async def process_accounts(self, email: str, use_proxy: bool, rotate_proxy: bool):
-        is_valid = await self.process_check_connection(email, use_proxy, rotate_proxy)
-        if not is_valid: return
+    async def process_check_tokens(self, email: str, proxy_url=None):
+        exp_time = self.decode_token(email)
+        if not exp_time:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Invalid Token {Style.RESET_ALL}"
+            )
+            return False
 
-        proxy = self.get_next_proxy_for_account(email) if use_proxy else None
+        if int(time.time()) > exp_time:
+            refresh = await self.refresh_token(email, proxy_url)
+            if not refresh: return False
 
-        balance = await self.token_balance(email, proxy)
+            self.accounts[email]["accessToken"] = refresh.get("data", {}).get("accessToken")
+            self.accounts[email]["refreshToken"] = refresh.get("data", {}).get("refreshToken")
+
+            account_data = [{
+                "email": email,
+                "interlinkId": self.accounts[email]["interlinkId"],
+                "passcode": self.accounts[email]["passcode"],
+                "tokens": {
+                    "accessToken": self.accounts[email]["accessToken"],
+                    "refreshToken": self.accounts[email]["refreshToken"]
+                }
+            }]
+            self.save_accounts(account_data)
+
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
+                f"{Fore.GREEN+Style.BRIGHT} Tokens Refreshed {Style.RESET_ALL}"
+            )
+
+        return True
+
+    async def process_accounts(self, email: str, proxy_url=None):
+        is_ok = await self.process_check_connection(email, proxy_url)
+        if not is_ok: return False
+
+        if self.USE_PROXY:
+            proxy_url = self.get_next_proxy_for_account(email)
+
+        is_valid = await self.process_check_tokens(email, proxy_url)
+        if not is_valid: return False
+
+        balance = await self.token_balance(email, proxy_url)
         if balance:
             token_balance = balance.get("data", {}).get("interlinkTokenAmount", 0)
             silver_balance = balance.get("data", {}).get("interlinkSilverTokenAmount", 0)
@@ -328,12 +437,12 @@ class Interlink:
                 f"{Fore.WHITE+Style.BRIGHT} {diamond_balance} {Style.RESET_ALL}"
             )
 
-        claimable = await self.claimable_check(email, proxy)
+        claimable = await self.claimable_check(email, proxy_url)
         if claimable:
             is_claimable = claimable.get("data", {}).get("isClaimable", False)
 
             if is_claimable:
-                claim = await self.claim_airdrop(email, proxy)
+                claim = await self.claim_airdrop(email, proxy_url)
                 if claim:
                     reward = claim.get("data") or "N/A"
 
@@ -364,7 +473,7 @@ class Interlink:
                 self.log(f"{Fore.RED}No Accounts Loaded.{Style.RESET_ALL}")
                 return
 
-            proxy_choice, rotate_proxy = self.print_question()
+            self.print_question()
 
             while True:
                 self.clear_terminal()
@@ -374,60 +483,46 @@ class Interlink:
                     f"{Fore.WHITE + Style.BRIGHT}{len(accounts)}{Style.RESET_ALL}"
                 )
 
-                use_proxy = True if proxy_choice == 1 else False
-                if use_proxy:
-                    await self.load_proxies()
+                if self.USE_PROXY: self.load_proxies()
         
                 separator = "=" * 27
                 for idx, account in enumerate(accounts, start=1):
-                    if account:
-                        email = account.get("email")
-                        tokens = account.get("tokens", {})
-                        access_token = tokens.get("accessToken")
-                        refresh_token = tokens.get("refreshToken")
+                    email = account.get("email")
+                    interlink_id = account.get("interlinkId")
+                    passcode = account.get("passcode")
+                    tokens = account.get("tokens", {})
+                    access_token = tokens.get("accessToken")
+                    refresh_token = tokens.get("refreshToken")
 
+                    self.log(
+                        f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}Of{Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {len(accounts)} {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
+                    )
+
+                    if "@" not in email or not interlink_id or not passcode or not access_token or not refresh_token:
                         self.log(
-                            f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
-                            f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
-                            f"{Fore.CYAN + Style.BRIGHT}Of{Style.RESET_ALL}"
-                            f"{Fore.WHITE + Style.BRIGHT} {len(accounts)} {Style.RESET_ALL}"
-                            f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
+                            f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
+                            f"{Fore.RED+Style.BRIGHT} Invalid Account Data {Style.RESET_ALL}"
                         )
+                        continue
 
-                        if not email or not "@" in email or not access_token or not refresh_token:
-                            self.log(
-                                f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
-                                f"{Fore.RED+Style.BRIGHT} Invalid Account Data {Style.RESET_ALL}"
-                            )
-                            continue
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Account:{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(email)} {Style.RESET_ALL}"
+                    )
 
-                        self.log(
-                            f"{Fore.CYAN+Style.BRIGHT}Account:{Style.RESET_ALL}"
-                            f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(email)} {Style.RESET_ALL}"
-                        )
-
-                        exp_time = self.decode_token(access_token)
-                        if not exp_time:
-                            self.log(
-                                f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
-                                f"{Fore.RED+Style.BRIGHT} Invalid Token {Style.RESET_ALL}"
-                            )
-                            continue
-
-                        if int(time.time()) > exp_time:
-                            self.log(
-                                f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
-                                f"{Fore.RED+Style.BRIGHT} Token Already Expired {Style.RESET_ALL}"
-                            )
-                            continue
-
-                        self.tokens[email] = {
-                            "accessToken": access_token,
-                            "refreshToken": refresh_token
-                        }
-                        
-                        await self.process_accounts(email, use_proxy, rotate_proxy)
-                        await asyncio.sleep(3)
+                    self.accounts[email] = {
+                        "interlinkId": interlink_id,
+                        "passcode": passcode,
+                        "accessToken": access_token,
+                        "refreshToken": refresh_token
+                    }
+                    
+                    await self.process_accounts(email)
+                    await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*65)
                 seconds = 4 * 60 * 60
