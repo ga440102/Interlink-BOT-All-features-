@@ -12,9 +12,12 @@ import asyncio, random, time, json, sys, re, os
 
 class Interlink:
     def __init__(self) -> None:
-        self.BASE_API = "https://prod.interlinklabs.ai/api/v1"
+        self.BASE_API = "https://prod.interlinklabs.ai"
+        self.VERSION = "5.0.0"
+
         self.USE_PROXY = False
         self.ROTATE_PROXY = False
+
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
@@ -73,8 +76,9 @@ class Interlink:
 
             for new_acc in new_accounts:
                 email = new_acc["email"]
+
                 if email in account_dict:
-                    account_dict[email]["tokens"] = new_acc["tokens"]
+                    account_dict[email].update(new_acc)
                 else:
                     account_dict[email] = new_acc
 
@@ -179,10 +183,25 @@ class Interlink:
             mask_account = local[:3] + '*' * 3 + local[-3:]
             return f"{mask_account}@{domain}"
         
-    def initialize_headers(self):
+    def generate_device_id(self):
+        return str(os.urandom(8).hex())
+    
+    def generate_timestamp(self):
+        return str(int(time.time()) * 1000)
+        
+    def initialize_headers(self, email: str):
         headers = {
             "Host": "prod.interlinklabs.ai",
             "Accept": "*/*",
+            "Version": self.VERSION,
+            "X-Platform": "android",
+            "X-Date": self.generate_timestamp(),
+            "X-Unique-Id": self.accounts[email]["deviceId"],
+            "X-Model": "25053PC47G",
+            "X-Brand": "POCO",
+            "X-System-Name": "Android",
+            "X-Device-Id": self.accounts[email]["deviceId"],
+            "X-Bundle-Id": "org.ai.interlinklabs.interlinkId",
             "Accept-Encoding": "gzip, deflate",
             "User-Agent": "okhttp/4.12.0"
         }
@@ -241,12 +260,12 @@ class Interlink:
             return None
     
     async def refresh_token(self, email: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/auth/token"
+        url = f"{self.BASE_API}/api/v1/auth/token"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers()
+                headers = self.initialize_headers(email)
                 headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
                 headers["Content-Type"] = "application/json"
                 payload = {
@@ -254,7 +273,7 @@ class Interlink:
                 }
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
                         await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
@@ -271,16 +290,16 @@ class Interlink:
         return None
     
     async def token_balance(self, email: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/token/get-token"
+        url = f"{self.BASE_API}/api/v1/token/get-token"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers()
+                headers = self.initialize_headers(email)
                 headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
+                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
                         await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
@@ -297,16 +316,16 @@ class Interlink:
         return None
             
     async def claimable_check(self, email: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/token/check-is-claimable"
+        url = f"{self.BASE_API}/api/v1/token/check-is-claimable"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers()
+                headers = self.initialize_headers(email)
                 headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
+                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
                         await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
@@ -323,17 +342,17 @@ class Interlink:
         return None
             
     async def claim_airdrop(self, email: str, proxy_url=None, retries=1):
-        url = f"{self.BASE_API}/token/claim-airdrop"
+        url = f"{self.BASE_API}/api/v1/token/claim-airdrop"
 
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers()
+                headers = self.initialize_headers(email)
                 headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
                 headers["Content-Type"] = "application/json"
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
-                    async with session.post(url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth, ssl=False) as response:
+                    async with session.post(url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth) as response:
                         await self.enusre_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
@@ -384,6 +403,7 @@ class Interlink:
                 "email": email,
                 "interlinkId": self.accounts[email]["interlinkId"],
                 "passcode": self.accounts[email]["passcode"],
+                "deviceId": self.accounts[email]["deviceId"],
                 "tokens": {
                     "accessToken": self.accounts[email]["accessToken"],
                     "refreshToken": self.accounts[email]["refreshToken"]
@@ -490,9 +510,25 @@ class Interlink:
                     email = account.get("email")
                     interlink_id = account.get("interlinkId")
                     passcode = account.get("passcode")
+                    device_id = account.get("deviceId")
                     tokens = account.get("tokens", {})
                     access_token = tokens.get("accessToken")
                     refresh_token = tokens.get("refreshToken")
+
+                    if device_id is None:
+                        device_id = self.generate_device_id()
+
+                    account_data = [{
+                        "email": email,
+                        "interlinkId": interlink_id,
+                        "passcode": passcode,
+                        "deviceId": device_id,
+                        "tokens": {
+                            "accessToken": access_token,
+                            "refreshToken": refresh_token
+                        }
+                    }]
+                    self.save_accounts(account_data)
 
                     self.log(
                         f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
@@ -502,7 +538,7 @@ class Interlink:
                         f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
                     )
 
-                    if "@" not in email or not interlink_id or not passcode or not access_token or not refresh_token:
+                    if "@" not in email or not interlink_id or not passcode or not device_id or not access_token or not refresh_token:
                         self.log(
                             f"{Fore.CYAN+Style.BRIGHT}Status :{Style.RESET_ALL}"
                             f"{Fore.RED+Style.BRIGHT} Invalid Account Data {Style.RESET_ALL}"
@@ -517,6 +553,7 @@ class Interlink:
                     self.accounts[email] = {
                         "interlinkId": interlink_id,
                         "passcode": passcode,
+                        "deviceId": device_id,
                         "accessToken": access_token,
                         "refreshToken": refresh_token
                     }
