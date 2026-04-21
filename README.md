@@ -1,6 +1,6 @@
 # 🌅 Interlink BOT
 
-> Automated Mining $ITLG with multi-account and proxy support
+> Automated Mining $ITLG with multi-account and proxy support,Newly added recovery and secret group functions
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
