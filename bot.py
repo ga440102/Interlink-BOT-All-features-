@@ -6,7 +6,7 @@ from aiohttp import (
 )
 from aiohttp_socks import ProxyConnector
 from base64 import urlsafe_b64decode
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from colorama import *
 import asyncio, random, time, json, sys, re, os
 
@@ -22,6 +22,28 @@ class Interlink:
         self.proxy_index = 0
         self.account_proxies = {}
         self.accounts = {}
+
+        # ===== 功能开关 =====
+        self.ENABLE_GROUP_MINING  = True   # 安全组挖矿签到开关
+        self.ENABLE_RECOVERY      = True   # ITLG恢复开关
+
+        # ===== 安全组挖矿配置 =====
+        # 已通过APK反编译+API探测确认的端点
+        self.GROUP_MINING_LIST      = "/api/v1/group-mining/get-list-group-mining"     # 获取账号所在群组列表
+        self.GROUP_MINING_DETAIL    = "/api/v1/group-mining/get-detail-group-mining"   # 获取群组详情
+        self.GROUP_MINING_CLAIM     = "/api/v1/group-mining/claim-group-mining"        # 领取挖矿奖励
+        self.GROUP_MINING_CREATE    = "/api/v1/group-mining/create-group"              # 创建群组
+        self.GROUP_MINING_LEAVE     = "/api/v1/group-mining/leave-group"              # 离开群组
+        self.GROUP_MINING_INVITE    = "/api/v1/group-mining/invite-group"             # 邀请加入群组
+        self.GROUP_MINING_ACCEPT    = "/api/v1/group-mining/accept-invite-group"      # 接受邀请
+
+        # 缓存：每个账号的groupId，避免每次都查
+        self.account_groups = {}  # {email: groupId}
+
+        # ===== ITLG恢复配置 =====
+        self.RECOVERY_STATUS = "/api/v1/token/get-token"        # 恢复状态：直接用token信息接口，查 itlgRecoverable 字段
+        self.BURN_HISTORY    = "/api/v1/burn-histories/my"      # Burn历史：获取可恢复的transactionId列表
+        self.RECOVERY_CLAIM  = "/api/v1/recovery/claim"         # 领取恢复接口
 
     def clear_terminal(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -237,7 +259,7 @@ class Interlink:
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
 
-    async def enusre_ok(self, response):
+    async def ensure_ok(self, response):
         if response.status >= 400:
             raise Exception(f"HTTP: {response.status}:{await response.text()}")
 
@@ -248,7 +270,7 @@ class Interlink:
         try:
             async with ClientSession(connector=connector, timeout=ClientTimeout(total=15)) as session:
                 async with session.get(url=url, proxy=proxy, proxy_auth=proxy_auth) as response:
-                    await self.enusre_ok(response)
+                    await self.ensure_ok(response)
                     return True
         except (Exception, ClientResponseError) as e:
             self.log(
@@ -274,7 +296,7 @@ class Interlink:
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
-                        await self.enusre_ok(response)
+                        await self.ensure_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -300,7 +322,7 @@ class Interlink:
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
-                        await self.enusre_ok(response)
+                        await self.ensure_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -326,7 +348,7 @@ class Interlink:
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
-                        await self.enusre_ok(response)
+                        await self.ensure_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -353,7 +375,7 @@ class Interlink:
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth) as response:
-                        await self.enusre_ok(response)
+                        await self.ensure_ok(response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -367,7 +389,429 @@ class Interlink:
                 )
 
         return None
+
+    # ========== 安全组挖矿（Security Group / Group Mining） ==========
     
+    async def group_mining_get_list(self, email: str, proxy_url=None, retries=3):
+        """获取账号所在的安全组列表（自动获取groupId）"""
+        url = f"{self.BASE_API}{self.GROUP_MINING_LIST}"
+
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(email)
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+                headers["Content-Type"] = "application/json"
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        status = response.status
+                        data = await response.json()
+                        if status == 200:
+                            return data
+                        # 非200也返回，让调用者处理
+                        return data
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(3)
+                    continue
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Get Group List {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+
+    async def group_mining_claim(self, email: str, group_id: str, proxy_url=None, retries=3):
+        """领取安全组挖矿奖励"""
+        url = f"{self.BASE_API}{self.GROUP_MINING_CLAIM}"
+
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(email)
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+                headers["Content-Type"] = "application/json"
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url,
+                        headers=headers,
+                        json={"groupId": group_id},
+                        proxy=proxy,
+                        proxy_auth=proxy_auth
+                    ) as response:
+                        status = response.status
+                        data = await response.json()
+                        
+                        if status == 200:
+                            return data
+                        
+                        # 400 可能是已领取
+                        if status == 400:
+                            msg = data.get("message", {})
+                            if isinstance(msg, dict):
+                                msg = msg.get("message", "")
+                            if "ALREADY_CLAIMED" in str(msg).upper():
+                                return {"statusCode": 200, "already_claimed": True, "data": {}}
+                        
+                        if attempt < retries - 1:
+                            await asyncio.sleep(3)
+                            continue
+                        return data
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(3)
+                    continue
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Claim Failed {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+
+    async def process_group_mining(self, email: str, proxy_url=None):
+        """安全组挖矿完整流程：获取群组 → 只领取可领取的群奖励
+        
+        一个账号可能在多个群里，但只能领取 isClaimGroupMining=true 的群的奖励。
+        API 通过 isClaimGroupMining 字段标记哪个群是"挖矿群"（可领取的）。
+        跟随主循环，每次都查API判断状态（不管几点启动都能正确处理）。
+        """
+        self.log(
+            f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT} Fetching Group Mining Info... {Style.RESET_ALL}"
+        )
+
+        # Step 1: 获取群组列表
+        result = await self.group_mining_get_list(email, proxy_url)
+        if not result:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} API returned no result {Style.RESET_ALL}"
+            )
+            return
+
+        # 调试：打印API返回的关键字段
+        status_code = result.get("statusCode", result.get("status", "?"))
+        self.log(
+            f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT} API statusCode: {status_code} {Style.RESET_ALL}"
+        )
+
+        data = result.get("data", {})
+        groups = data.get("groups", [])
+        is_claimable = data.get("isClaimable", False)
+        has_claimed_today = data.get("requesterHasClaimedToday", False)
+
+        if not groups:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} Not in any Security Group yet {Style.RESET_ALL}"
+            )
+            return
+
+        # 显示所有群组信息，标注哪个是可领取的挖矿群
+        claim_group = None  # 可领取奖励的群
+        for group in groups:
+            group_id = group.get("groupId", "?")
+            status = group.get("statusLabel", "?")
+            can_claim = group.get("canClaim", False)
+            is_secure = group.get("secure", False)
+            is_mining = group.get("isClaimGroupMining", False)  # 是否是挖矿群（可领取奖励的群）
+            total_reward = group.get("totalReward", 0)
+            counts = group.get("counts", {})
+            total_members = counts.get("totalMembers", 0)
+            claimed_yesterday = counts.get("claimedYesterday", 0)
+
+            mining_tag = f"{Fore.GREEN+Style.BRIGHT}[Mining]{Style.RESET_ALL}" if is_mining else f"{Fore.YELLOW+Style.BRIGHT}[View]{Style.RESET_ALL}"
+
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f" {mining_tag}"
+                f"{Fore.BLUE+Style.BRIGHT} Group: {Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT}{group_id} {Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.BLUE+Style.BRIGHT} Members: {Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT}{total_members} {Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.BLUE+Style.BRIGHT} Secure: {Style.RESET_ALL}"
+                f"{Fore.GREEN+Style.BRIGHT}{'Yes' if is_secure else 'No'}{Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.BLUE+Style.BRIGHT} Reward: {Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT}{total_reward} ITLG{Style.RESET_ALL}"
+            )
+
+            # 记录可领取的挖矿群（isClaimGroupMining=true 的群）
+            if is_mining and claim_group is None:
+                claim_group = group
+
+        # 如果没有标记 isClaimGroupMining 的群，fallback 到第一个群
+        if claim_group is None and groups:
+            claim_group = groups[0]
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} No isClaimGroupMining group found, using first group {Style.RESET_ALL}"
+            )
+
+        # 缓存groupId
+        if claim_group:
+            self.account_groups[email] = claim_group.get("groupId", "?")
+
+        # Step 2: 领取奖励（只领挖矿群的）
+        if has_claimed_today:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} Already Claimed Today {Style.RESET_ALL}"
+            )
+            # 显示下次可领取时间
+            next_ts = data.get("nextTimeClaim", 0)
+            if next_ts:
+                next_time = datetime.fromtimestamp(next_ts / 1000).strftime('%x %X')
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} Next Claim at: {next_time} {Style.RESET_ALL}"
+                )
+            return
+
+        if not is_claimable:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} Not Claimable Yet {Style.RESET_ALL}"
+            )
+            return
+
+        if not claim_group:
+            return
+
+        # 只领取挖矿群的奖励
+        group_id = claim_group.get("groupId")
+        can_claim = claim_group.get("canClaim", False)
+
+        if not can_claim and not is_claimable:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} Group {group_id} not claimable yet {Style.RESET_ALL}"
+            )
+            return
+
+        self.log(
+            f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT} Claiming Group {group_id}... {Style.RESET_ALL}"
+        )
+
+        claim = await self.group_mining_claim(email, group_id, proxy_url)
+        if claim:
+            if claim.get("already_claimed"):
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} Already Claimed Today {Style.RESET_ALL}"
+                )
+            else:
+                claim_data = claim.get("data", {})
+                reward = claim_data.get("totalReward", "N/A")
+                next_ts = claim_data.get("nextTimeClaim", 0)
+
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.GREEN+Style.BRIGHT} Claimed Successfully! {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT} Reward: {Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT}{reward} ITLG{Style.RESET_ALL}"
+                )
+
+                if next_ts:
+                    next_time = datetime.fromtimestamp(next_ts / 1000).strftime('%x %X')
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} Next Claim at: {next_time} {Style.RESET_ALL}"
+                    )
+        else:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Claim Failed, Will Retry Next Loop {Style.RESET_ALL}"
+            )
+
+    # ========== ITLG 恢复 ==========
+
+    async def recovery_status(self, email: str, proxy_url=None, retries=5):
+        """查询ITLG恢复状态 - 获取token信息和burn历史中的可恢复记录"""
+        token_url = f"{self.BASE_API}{self.RECOVERY_STATUS}"
+        burn_url  = f"{self.BASE_API}{self.BURN_HISTORY}"
+
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(email)
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    # 同时请求 token信息和burn历史
+                    t_resp, b_resp = await asyncio.gather(
+                        session.get(url=token_url, headers=headers, proxy=proxy, proxy_auth=proxy_auth),
+                        session.get(url=burn_url,  headers=headers, proxy=proxy, proxy_auth=proxy_auth),
+                    )
+
+                    await self.ensure_ok(t_resp)
+                    token_data = await t_resp.json()
+
+                    b_status = b_resp.status
+                    burn_data = await b_resp.json() if b_status == 200 else {"data": []}
+
+                # 合并数据
+                t_data = token_data.get("data", token_data)
+                burn_records = burn_data.get("data", {}).get("data", burn_data.get("data", []))
+
+                # 找可恢复且未恢复的记录
+                recoverable_records = [
+                    r for r in burn_records
+                    if r.get("isRecoverable") and not r.get("isRecovered")
+                ]
+
+                return {
+                    "data": {
+                        **t_data,
+                        "recoverable_records": recoverable_records,
+                    }
+                }
+
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Recovery Status {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+
+    async def claim_recovery(self, email: str, transaction_id: str, proxy_url=None, retries=3):
+        """执行ITLG恢复领取 - 用正确的transactionId参数"""
+        url = f"{self.BASE_API}{self.RECOVERY_CLAIM}"
+
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(email)
+                headers["Authorization"] = f"Bearer {self.accounts[email]['accessToken']}"
+                headers["Content-Type"] = "application/json"
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url,
+                        headers=headers,
+                        json={"transactionId": transaction_id},
+                        proxy=proxy,
+                        proxy_auth=proxy_auth
+                    ) as response:
+                        status = response.status
+                        data = await response.json()
+
+                        # 201 = 已排队处理（成功），200 = 已领取过了
+                        if status in (200, 201):
+                            return data
+
+                        # 其他错误码 → 重试
+                        msg = data.get("message", "")
+                        if attempt < retries - 1:
+                            await asyncio.sleep(3)
+                            continue
+                        self.log(
+                            f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                            f"{Fore.RED+Style.BRIGHT} Recovery Failed [{status}] {Style.RESET_ALL}"
+                            f"{Fore.YELLOW+Style.BRIGHT} {msg} {Style.RESET_ALL}"
+                        )
+                        return data
+
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Recovery Claim Failed {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+
+    async def process_recovery(self, email: str, proxy_url=None):
+        """ITLG恢复完整流程"""
+        self.log(
+            f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT} Checking Recovery Status... {Style.RESET_ALL}"
+        )
+
+        status = await self.recovery_status(email, proxy_url)
+        if not status:
+            return
+
+        data = status.get("data", {})
+
+        recoverable = data.get("itlgRecoverable", 0)
+        burned_cycles = data.get("burnedCycles", "N/A")
+        burning_streak = data.get("burningStreak", "N/A")
+        recoverable_records = data.get("recoverable_records", [])
+
+        self.log(
+            f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+            f"{Fore.BLUE+Style.BRIGHT} Burned: {Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT}{burned_cycles} cycles {Style.RESET_ALL}"
+            f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+            f"{Fore.BLUE+Style.BRIGHT} Streak: {Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT}{burning_streak} {Style.RESET_ALL}"
+            f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+            f"{Fore.BLUE+Style.BRIGHT} Recoverable: {Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT}{recoverable} ITLG{Style.RESET_ALL}"
+        )
+
+        if not recoverable_records:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} No Recoverable Records Found {Style.RESET_ALL}"
+            )
+            return
+
+        # 遍历所有可恢复记录，逐个领取
+        for record in recoverable_records:
+            tx_id = record.get("transactionId")
+            amt   = record.get("amount", 0)
+
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT} Claiming {amt} ITLG "
+                f"({tx_id})... {Style.RESET_ALL}"
+            )
+
+            claim = await self.claim_recovery(email, tx_id, proxy_url)
+            if claim:
+                claimed_amt = claim.get("data", {}).get("amount", amt)
+                job_id = claim.get("data", {}).get("jobId", "N/A")
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                    f"{Fore.GREEN+Style.BRIGHT} Recovery Queued Successfully! {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT} Amount: {Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT}{claimed_amt} ITLG {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT} JobID: {Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT}{job_id} {Style.RESET_ALL}"
+                )
+            else:
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Recovery Failed for {tx_id} {Style.RESET_ALL}"
+                )
+
+    # ========== 主流程 ==========
+
     async def process_check_connection(self, email: str, proxy_url=None):
         while True:
             if self.USE_PROXY:
@@ -473,7 +917,7 @@ class Interlink:
                         f"{Fore.CYAN+Style.BRIGHT} Reward: {Style.RESET_ALL}"
                         f"{Fore.WHITE+Style.BRIGHT}{reward}{Style.RESET_ALL}"
                     )
-            
+
             else:
                 next_frame_ts = claimable.get("data", {}).get("nextFrame", 0) / 1000
                 next_frame_wib = datetime.fromtimestamp(next_frame_ts).strftime('%x %X')
@@ -485,7 +929,25 @@ class Interlink:
                     f"{Fore.CYAN+Style.BRIGHT} Next Claim at: {Style.RESET_ALL}"
                     f"{Fore.WHITE+Style.BRIGHT}{next_frame_wib}{Style.RESET_ALL}"
                 )
-        
+
+        if self.ENABLE_GROUP_MINING:
+            try:
+                await self.process_group_mining(email, proxy_url)
+            except Exception as e:
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Error: {e} {Style.RESET_ALL}"
+                )
+
+        if self.ENABLE_RECOVERY:
+            try:
+                await self.process_recovery(email, proxy_url)
+            except Exception as e:
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Recover:{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Error: {e} {Style.RESET_ALL}"
+                )
+
     async def main(self):
         try:
             accounts = self.load_accounts()
@@ -562,7 +1024,29 @@ class Interlink:
                     await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*65)
-                seconds = 4 * 60 * 60
+
+                # 智能等待：计算到下一个早上9点的秒数
+                # 安全组挖矿每天9点刷新，普通挖矿4小时一轮
+                now = datetime.now()
+                next_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                if now >= next_9am:
+                    next_9am = next_9am + timedelta(days=1)
+                seconds_to_9am = int((next_9am - now).total_seconds())
+
+                # 如果距9点不到1小时，等到9点；否则等4小时（普通挖矿周期）
+                if seconds_to_9am <= 3600:
+                    seconds = seconds_to_9am + 30  # 9点后多等30秒，确保服务端已刷新
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} Waiting until 09:00 for Group Mining reset... {Style.RESET_ALL}"
+                    )
+                else:
+                    seconds = 4 * 60 * 60
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} Next Group Mining reset at: {next_9am.strftime('%x %X')} {Style.RESET_ALL}"
+                    )
+
                 while seconds > 0:
                     formatted_time = self.format_seconds(seconds)
                     print(
