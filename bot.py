@@ -1025,28 +1025,43 @@ class Interlink:
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*65)
 
-                # 智能等待：计算到下一个早上9点的秒数
-                # 安全组挖矿每天9点刷新，普通挖矿4小时一轮
+                # 固定时间点签到：00:01, 04:01, 08:01, 12:01, 16:01, 20:01
                 now = datetime.now()
-                next_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
-                if now >= next_9am:
-                    next_9am = next_9am + timedelta(days=1)
-                seconds_to_9am = int((next_9am - now).total_seconds())
+                schedule_times = [0, 4, 8, 12, 16, 20]
+                next_run = None
+                
+                for h in schedule_times:
+                    candidate = now.replace(hour=h, minute=1, second=0, microsecond=0)
+                    if candidate > now:
+                        next_run = candidate
+                        break
+                
+                if next_run is None:
+                    next_run = (now + timedelta(days=1)).replace(hour=0, minute=1, second=0, microsecond=0)
+                
+                seconds = int((next_run - now).total_seconds()) + 30
+                time_str = next_run.strftime("%x %X")
+                self.log(
+                    f"{Fore.CYAN+Style.BRIGHT}Next Run:{Style.RESET_ALL}"
+                    f"{Fore.WHITE+Style.BRIGHT} {time_str} {Style.RESET_ALL}"
+                )
 
-                # 如果距9点不到1小时，等到9点；否则等4小时（普通挖矿周期）
-                if seconds_to_9am <= 3600:
-                    seconds = seconds_to_9am + 30  # 9点后多等30秒，确保服务端已刷新
-                    self.log(
-                        f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
-                        f"{Fore.WHITE+Style.BRIGHT} Waiting until 09:00 for Group Mining reset... {Style.RESET_ALL}"
-                    )
-                else:
-                    seconds = 4 * 60 * 60
-                    self.log(
-                        f"{Fore.CYAN+Style.BRIGHT}GrpMine:{Style.RESET_ALL}"
-                        f"{Fore.WHITE+Style.BRIGHT} Next Group Mining reset at: {next_9am.strftime('%x %X')} {Style.RESET_ALL}"
-                    )
-
+                # 检查是否错过固定时间点（5分钟容错）
+                now = datetime.now()
+                missed = False
+                for h in schedule_times:
+                    candidate = now.replace(hour=h, minute=1, second=0, microsecond=0)
+                    if now > candidate and (now - candidate).total_seconds() <= 300:
+                        missed = True
+                        time_str = candidate.strftime("%H:%M")
+                        self.log(
+                            f"{Fore.YELLOW+Style.BRIGHT}Missed schedule {time_str}, running immediately...{Style.RESET_ALL}"
+                        )
+                        break
+                
+                if missed:
+                    continue
+                
                 while seconds > 0:
                     formatted_time = self.format_seconds(seconds)
                     print(
